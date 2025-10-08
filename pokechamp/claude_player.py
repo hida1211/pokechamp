@@ -6,7 +6,10 @@ import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import anthropic
+try:
+    import anthropic
+except ImportError:  # pragma: no cover - optional dependency
+    anthropic = None
 
 from pokechamp.reasoning_config import ReasoningConfig
 
@@ -15,6 +18,12 @@ class ClaudePlayer:
     """Wrapper around the Anthropic SDK providing PokéChamp's interface."""
 
     def __init__(self, api_key: str = "") -> None:
+        if anthropic is None:
+            raise ImportError(
+                "anthropic package is required for Claude support. Install it via "
+                "`pip install anthropic` or ensure requirements.txt has been installed."
+            )
+
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
         self.client = anthropic.Anthropic(api_key=self.api_key)  # type: ignore[arg-type]
 
