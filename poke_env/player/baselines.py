@@ -18,8 +18,26 @@ from poke_env.player.player import Player
 from poke_env.data.gen_data import GenData
 from pokechamp.prompts import get_micro_strat, get_move_prompt, get_number_turns_faint, get_status_num_turns_fnt, prompt_translate
 
-with open("./poke_env/data/static/moves/moves_effect.json", "r") as f:
-    move_effect = json.load(f)
+try:
+    from pokechamp.data_cache import (
+        get_cached_move_effect,
+        get_cached_pokemon_move_dict,
+        get_cached_ability_effect,
+        get_cached_pokemon_ability_dict,
+        get_cached_item_effect,
+        get_cached_pokemon_item_dict,
+        get_cached_pokedex,
+    )
+except ImportError:  # pragma: no cover - fallback for legacy environments
+    get_cached_move_effect = lambda: {}
+    get_cached_pokemon_move_dict = lambda: {}
+    get_cached_ability_effect = lambda: {}
+    get_cached_pokemon_ability_dict = lambda: {}
+    get_cached_item_effect = lambda: {}
+    get_cached_pokemon_item_dict = lambda: {}
+    get_cached_pokedex = lambda gen: {}
+
+move_effect = get_cached_move_effect()
 
 def calculate_move_type_damage_multipier(type_1, type_2, type_chart, constraint_type_list):
     TYPE_list = 'BUG,DARK,DRAGON,ELECTRIC,FAIRY,FIGHTING,FIRE,FLYING,GHOST,GRASS,GROUND,ICE,NORMAL,POISON,PSYCHIC,ROCK,STEEL,WATER'.split(",")
@@ -127,24 +145,15 @@ class Human(Player):
         self.team_str = team
         self.use_strat_prompt = _use_strat_prompt
         
-        with open("./poke_env/data/static/moves/moves_effect.json", "r") as f:
-            self.move_effect = json.load(f)
-        # only used in old prompting method, replaced by statistcal sets data
-        with open(f"./poke_env/data/static/moves/gen8pokemon_move_dict.json", "r") as f:
-            self.pokemon_move_dict = json.load(f)
-        with open("./poke_env/data/static/abilities/ability_effect.json", "r") as f:
-            self.ability_effect = json.load(f)
-        # only used is old prompting method
-        with open("./poke_env/data/static/abilities/gen8pokemon_ability_dict.json", "r") as f:
-            self.pokemon_ability_dict = json.load(f)
-        with open("./poke_env/data/static/items/item_effect.json", "r") as f:
-            self.item_effect = json.load(f)
-        # unused
-        # with open(f"./poke_env/data/static/items/gen8pokemon_item_dict.json", "r") as f:
-        #     self.pokemon_item_dict = json.load(f)
-        self.pokemon_item_dict = {}
-        with open(f"./poke_env/data/static/pokedex/gen{self.gen.gen}pokedex.json", "r") as f:
-            self._pokemon_dict = json.load(f)
+        self.move_effect = get_cached_move_effect()
+        # only used in old prompting method, replaced by statistical sets data
+        self.pokemon_move_dict = get_cached_pokemon_move_dict()
+        self.ability_effect = get_cached_ability_effect()
+        # only used in old prompting method
+        self.pokemon_ability_dict = get_cached_pokemon_ability_dict()
+        self.item_effect = get_cached_item_effect()
+        self.pokemon_item_dict = get_cached_pokemon_item_dict()
+        self._pokemon_dict = get_cached_pokedex(self.gen.gen)
 
         self.last_plan = ""
     def choose_move(self, battle: AbstractBattle):
@@ -197,20 +206,13 @@ class OneStepPlayer(Player):
                          server_configuration=server_configuration)
         
         self.gen = GenData.from_format(battle_format)
-        with open("./poke_env/data/static/moves/moves_effect.json", "r") as f:
-            self.move_effect = json.load(f)
-        with open("./poke_env/data/static/moves/gen8pokemon_move_dict.json", "r") as f:
-            self.pokemon_move_dict = json.load(f)
-        with open("./poke_env/data/static/abilities/ability_effect.json", "r") as f:
-            self.ability_effect = json.load(f)
-        with open("./poke_env/data/static/abilities/gen8pokemon_ability_dict.json", "r") as f:
-            self.pokemon_ability_dict = json.load(f)
-        with open("./poke_env/data/static/items/item_effect.json", "r") as f:
-            self.item_effect = json.load(f)
-        with open("./poke_env/data/static/items/gen8pokemon_item_dict.json", "r") as f:
-            self.pokemon_item_dict = json.load(f)
-        with open("./poke_env/data/static/pokedex/gen8pokedex.json", "r") as f:
-            self._pokemon_dict = json.load(f)
+        self.move_effect = get_cached_move_effect()
+        self.pokemon_move_dict = get_cached_pokemon_move_dict()
+        self.ability_effect = get_cached_ability_effect()
+        self.pokemon_ability_dict = get_cached_pokemon_ability_dict()
+        self.item_effect = get_cached_item_effect()
+        self.pokemon_item_dict = get_cached_pokemon_item_dict()
+        self._pokemon_dict = get_cached_pokedex(self.gen.gen)
             
         self.t = 0
         self.K = 1
@@ -1009,4 +1011,3 @@ class AbyssalPlayer(Player):
                 return "sleeping"
         else:
             return "healthy"
-
