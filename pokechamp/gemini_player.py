@@ -96,7 +96,6 @@ class GeminiPlayer:
         actions: Optional[Sequence[Sequence[str]]] = None,
         reasoning_config: Optional[ReasoningConfig] = None,
     ) -> Tuple[str, bool]:
-    def get_LLM_action(self, system_prompt, user_prompt, model='gemini-2.0-flash', temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=1000, actions=None, response_schema=None, reasoning_effort=None) -> str:
         try:
             model_config = self._resolve_model_config(model)
 
