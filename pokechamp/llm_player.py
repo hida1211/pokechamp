@@ -1,6 +1,7 @@
 import ast
 from copy import copy, deepcopy
 import datetime
+import inspect
 import json
 import os
 import random
@@ -134,10 +135,33 @@ class LLMPlayer(Player):
         self.max_depth_for_llm_eval = 2  # Only use LLM evaluation for shallow depths to save time
 
     def get_LLM_action(self, system_prompt, user_prompt, model, temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=200, actions=None, llm=None) -> str:
-        if llm is None:
-            output, _ = self.llm.get_LLM_action(system_prompt, user_prompt, model, temperature, True, seed, stop, max_tokens=max_tokens, actions=actions)
-        else:
-            output, _ = llm.get_LLM_action(system_prompt, user_prompt, model, temperature, True, seed, stop, max_tokens=max_tokens, actions=actions)
+        target_llm = llm or self.llm
+        model_config = None
+        resolved_model = model
+
+        if hasattr(target_llm, "get_model_config"):
+            model_config = target_llm.get_model_config(model)
+            resolved_model = model_config.get("model", model)
+
+        call_kwargs = {
+            "model": resolved_model,
+            "temperature": temperature,
+            "json_format": True,
+            "seed": seed,
+            "stop": stop,
+            "max_tokens": max_tokens,
+            "actions": actions,
+        }
+
+        if model_config is not None:
+            try:
+                signature = inspect.signature(target_llm.get_LLM_action)
+                if "model_config" in signature.parameters:
+                    call_kwargs["model_config"] = model_config
+            except (TypeError, ValueError):
+                pass
+
+        output, _ = target_llm.get_LLM_action(system_prompt, user_prompt, **call_kwargs)
         return output
     
     def check_all_pokemon(self, pokemon_str: str) -> Pokemon:
