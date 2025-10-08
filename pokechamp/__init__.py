@@ -3,7 +3,19 @@ PokéChamp LLM Player Module
 
 This module contains the LLM-based Pokemon battle player implementation,
 including prompts, translation utilities, and various LLM backend integrations.
+
+Environment loading
+-------------------
+Automatically load a local .env if present so API keys configured in
+`pokechamp/.env` are available without exporting in the shell.
 """
+
+# Best-effort .env autoload (no-op if dependency missing)
+try:  # pragma: no cover - environment bootstrap
+    from dotenv import load_dotenv
+    load_dotenv()  # loads .env from current working dir or parents
+except Exception:
+    pass
 
 # Main classes - import when needed to avoid circular imports
 # from pokechamp.llm_player import LLMPlayer  
