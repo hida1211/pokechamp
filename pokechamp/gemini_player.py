@@ -37,7 +37,7 @@ class GeminiPlayer():
             'gemini-1.5-pro': 'gemini-1.5-pro',
         }
 
-    def get_LLM_action(self, system_prompt, user_prompt, model='gemini-2.0-flash', temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=1000, actions=None) -> str:
+    def get_LLM_action(self, system_prompt, user_prompt, model='gemini-2.0-flash', temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=1000, actions=None, response_schema=None, reasoning_effort=None) -> str:
         try:
             # Map model name to official API name
             api_model_name = self.model_mapping.get(model, model)

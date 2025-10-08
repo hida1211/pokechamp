@@ -7,6 +7,8 @@ import os
 import random
 import sys
 
+from dataclasses import dataclass, field
+
 import numpy as np
 from poke_env.environment.abstract_battle import AbstractBattle
 from poke_env.environment.battle import Battle
@@ -15,7 +17,7 @@ from poke_env.environment.move_category import MoveCategory
 from poke_env.environment.pokemon import Pokemon
 from poke_env.environment.side_condition import SideCondition
 from poke_env.player.player import Player, BattleOrder
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from poke_env.environment.move import Move
 import time
 import json
@@ -46,6 +48,23 @@ from difflib import get_close_matches
 from pokechamp.prompts import get_number_turns_faint, get_status_num_turns_fnt, state_translate, get_gimmick_motivation
 
 DEBUG=False
+
+
+@dataclass
+class ReasoningConfig:
+    schema_templates: Dict[str, Dict[str, Any]]
+    reasoning: bool = False
+    system_messages: List[str] = field(default_factory=list)
+    reasoning_prompt: str = ""
+    metadata_hints: Dict[str, List[str]] = field(default_factory=dict)
+    reasoning_effort: Optional[str] = None
+
+
+@dataclass
+class ReasoningRequest:
+    prompt: str
+    json_schema: Optional[Dict[str, Any]] = None
+
 
 class LLMPlayer(Player):
     def __init__(self,
@@ -126,6 +145,10 @@ class LLMPlayer(Player):
         else:
             self.llm = llm_backend
         self.llm_value = self.llm
+        self.reasoning_provider = self._detect_reasoning_provider(self.backend)
+        self.reasoning_config = self._build_reasoning_config(self.reasoning_provider, self.backend)
+        self.reasoning_telemetry: Dict[str, Any] = {}
+        self._latest_reasoning_requests: Dict[str, ReasoningRequest] = {}
         self.K = K      # for minimax, SC, ToT
         self.use_optimized_minimax = True  # Enable optimized minimax by default
         self._minimax_initialized = False
@@ -162,6 +185,521 @@ class LLMPlayer(Player):
                 pass
 
         output, _ = target_llm.get_LLM_action(system_prompt, user_prompt, **call_kwargs)
+    @staticmethod
+    def _detect_reasoning_provider(backend: str) -> str:
+        if not backend:
+            return "default"
+        backend_lower = backend.lower()
+        if backend_lower.startswith("ollama/"):
+            return "ollama"
+        if backend_lower.startswith("anthropic/") or "claude" in backend_lower:
+            return "anthropic"
+        if backend_lower.startswith("google/") or backend_lower.startswith("gemini") or "gemini" in backend_lower:
+            return "google"
+        if backend_lower.startswith("openai/") or backend_lower.startswith("oai/") or backend_lower.startswith("gpt") or "gpt" in backend_lower:
+            return "openai"
+        if "/" in backend_lower:
+            return backend_lower.split("/", 1)[0]
+        return backend_lower.split("-", 1)[0] or "default"
+
+    @staticmethod
+    def _base_schema_templates() -> Dict[str, Dict[str, Any]]:
+        action_schemas = {
+            "move": {
+                "example": {"move": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"move": {"type": "string"}},
+                    "required": ["move"],
+                    "additionalProperties": True,
+                },
+            },
+            "switch": {
+                "example": {"switch": "<switch_pokemon_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"switch": {"type": "string"}},
+                    "required": ["switch"],
+                    "additionalProperties": True,
+                },
+            },
+            "dynamax": {
+                "example": {"dynamax": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"dynamax": {"type": "string"}},
+                    "required": ["dynamax"],
+                    "additionalProperties": True,
+                },
+            },
+            "terastallize": {
+                "example": {"terastallize": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"terastallize": {"type": "string"}},
+                    "required": ["terastallize"],
+                    "additionalProperties": True,
+                },
+            },
+        }
+        reasoned_schemas = {
+            "move": {
+                "example": {"thought": "<brief_reasoning>", "move": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {"type": "string"},
+                        "move": {"type": "string"},
+                    },
+                    "required": ["thought", "move"],
+                    "additionalProperties": True,
+                },
+            },
+            "switch": {
+                "example": {"thought": "<brief_reasoning>", "switch": "<switch_pokemon_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {"type": "string"},
+                        "switch": {"type": "string"},
+                    },
+                    "required": ["thought", "switch"],
+                    "additionalProperties": True,
+                },
+            },
+            "dynamax": {
+                "example": {"thought": "<brief_reasoning>", "dynamax": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {"type": "string"},
+                        "dynamax": {"type": "string"},
+                    },
+                    "required": ["thought", "dynamax"],
+                    "additionalProperties": True,
+                },
+            },
+            "terastallize": {
+                "example": {"thought": "<brief_reasoning>", "terastallize": "<move_name>"},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {
+                        "thought": {"type": "string"},
+                        "terastallize": {"type": "string"},
+                    },
+                    "required": ["thought", "terastallize"],
+                    "additionalProperties": True,
+                },
+            },
+        }
+        return {
+            "action": {
+                "instruction": "Choose the best action for the current battle state.",
+                "output_prefix": "Respond with JSON matching: ",
+                "schemas": action_schemas,
+            },
+            "reasoned_action": {
+                "instruction": "Choose the best action and include a brief justification in a \"thought\" field (max 3 sentences).",
+                "output_prefix": "Respond with JSON matching: ",
+                "schemas": reasoned_schemas,
+            },
+            "options": {
+                "instruction": "Generate up to {max_k} candidate actions (k<={max_k}) ranked from best to worst.",
+                "output_prefix": "Respond with JSON matching: ",
+                "max_k": 3,
+            },
+            "decision": {
+                "instruction": "Select the best option from the following choices by considering their consequences: [OPTIONS].",
+                "output_prefix": "Respond with JSON matching: ",
+                "default_action": "move",
+            },
+        }
+
+    def _build_reasoning_config(self, provider: str, backend: Optional[str] = None) -> ReasoningConfig:
+        templates = deepcopy(self._base_schema_templates())
+        metadata_hints: Dict[str, List[str]] = {
+            "thought": ["thought", "analysis", "reasoning"],
+            "token_usage": ["usage.total_tokens", "usage.totalTokens", "token_usage.total"],
+        }
+        system_messages = ["Return only the JSON object requested."]
+        reasoning_prompt = ""
+        reasoning_enabled = False
+        reasoning_effort: Optional[str] = None
+        provider_lower = provider.lower() if provider else "default"
+        backend_lower = backend.lower() if backend else ""
+
+        if provider_lower == "anthropic":
+            reasoning_enabled = True
+            system_messages.append("Include a concise \"thought\" field summarizing your reasoning before choosing an action.")
+            reasoning_prompt = "\nProvide the \"thought\" field in fewer than three sentences."
+            metadata_hints["thinking"] = ["thinking", "claude_reasoning"]
+        elif provider_lower == "openai":
+            if "gpt-5" in backend_lower:
+                reasoning_effort = "medium"
+            system_messages.append("Provider openai must respond with the exact JSON schema described.")
+        elif provider_lower in {"google", "gemini"}:
+            system_messages.append("Follow Google's safety policies and respond only with the requested JSON.")
+            metadata_hints["safety"] = ["safety", "safetyAnnotations"]
+        elif provider_lower == "ollama":
+            system_messages.append("Keep the JSON compact and deterministic.")
+        else:
+            system_messages.append(f"Provider {provider_lower} must respond with the exact JSON schema described.")
+
+        return ReasoningConfig(
+            schema_templates=templates,
+            reasoning=reasoning_enabled,
+            system_messages=system_messages,
+            reasoning_prompt=reasoning_prompt,
+            metadata_hints=metadata_hints,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def build_reasoning_prompt(self, system_prompt: str, user_prompt: str) -> Tuple[str, str]:
+        config = getattr(self, "reasoning_config", None)
+        if config is None:
+            return system_prompt, user_prompt
+        system_segments = [segment for segment in config.system_messages if segment]
+        system_segments.append(system_prompt)
+        final_system_prompt = "\n\n".join(system_segments)
+        final_user_prompt = user_prompt
+        if config.reasoning and config.reasoning_prompt:
+            final_user_prompt = f"{user_prompt}{config.reasoning_prompt}"
+        return final_system_prompt, final_user_prompt
+
+    def _build_json_schema(
+        self,
+        prompt_type: str,
+        allowed_actions: List[str],
+        template: Dict[str, Any],
+        effective_max: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if prompt_type in {"action", "reasoned_action"}:
+            schema_map = template.get("schemas", {})
+            variants: List[Dict[str, Any]] = []
+            for action in allowed_actions:
+                schema_entry = schema_map.get(action)
+                if schema_entry and schema_entry.get("json_schema"):
+                    variants.append(deepcopy(schema_entry["json_schema"]))
+            if not variants and schema_map:
+                for schema_entry in schema_map.values():
+                    json_schema = schema_entry.get("json_schema")
+                    if json_schema:
+                        variants.append(deepcopy(json_schema))
+                        break
+            if not variants:
+                return None
+            if len(variants) == 1:
+                return variants[0]
+            return {"oneOf": variants}
+
+        if prompt_type == "options":
+            effective_max = effective_max or template.get("max_k", 3)
+            action_enum = allowed_actions or ["move", "switch", "dynamax", "terastallize"]
+            option_schema = {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": action_enum},
+                    "target": {"type": "string"},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            }
+            properties = {
+                f"option_{index}": deepcopy(option_schema)
+                for index in range(1, effective_max + 1)
+            }
+            return {
+                "type": "object",
+                "properties": properties,
+                "additionalProperties": False,
+                "minProperties": 1,
+                "maxProperties": effective_max,
+            }
+
+        if prompt_type == "decision":
+            action_enum = allowed_actions or ["move", "switch", "dynamax", "terastallize"]
+            return {
+                "type": "object",
+                "properties": {
+                    "decision": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": action_enum},
+                            "target": {"type": "string"},
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    }
+                },
+                "required": ["decision"],
+                "additionalProperties": False,
+            }
+
+        return None
+
+    def _get_reasoning_request(self, prompt_type: str, fallback_prompt: str = "") -> ReasoningRequest:
+        stored = self._latest_reasoning_requests.get(prompt_type)
+        if stored is None:
+            stored = ReasoningRequest(prompt=fallback_prompt)
+        elif fallback_prompt and stored.prompt != fallback_prompt:
+            stored = ReasoningRequest(prompt=fallback_prompt, json_schema=stored.json_schema)
+        self._latest_reasoning_requests[prompt_type] = stored
+        return stored
+
+    def _coerce_reasoning_request(self, value: Any, prompt_type: str) -> ReasoningRequest:
+        if isinstance(value, ReasoningRequest):
+            self._latest_reasoning_requests[prompt_type] = value
+            return value
+        text = value or ""
+        return self._get_reasoning_request(prompt_type, text)
+
+    def _reasoning_effort_param(self) -> Optional[str]:
+        config = getattr(self, "reasoning_config", None)
+        if config and config.reasoning_effort:
+            return config.reasoning_effort
+        return None
+
+    def format_reasoning_request(self, prompt_type: str, allowed_actions: List[str], max_k: int = 3) -> str:
+        config = getattr(self, "reasoning_config", None)
+        templates = config.schema_templates if config else self._base_schema_templates()
+        template = templates.get(prompt_type, {})
+        instruction = template.get("instruction", "")
+        output_prefix = template.get("output_prefix", "")
+        cleaned_actions: List[str] = []
+        for action in allowed_actions:
+            if action not in cleaned_actions:
+                cleaned_actions.append(action)
+
+        if prompt_type in {"action", "reasoned_action"}:
+            schema_map = template.get("schemas", {})
+            examples: List[str] = []
+            for action in cleaned_actions:
+                schema = schema_map.get(action)
+                if schema:
+                    examples.append(json.dumps(schema.get("example", {})))
+            if not examples and schema_map:
+                fallback = next(iter(schema_map.values()))
+                examples.append(json.dumps(fallback.get("example", {})))
+            example_string = " or ".join(examples)
+            prompt = f"{instruction} {output_prefix}{example_string}\n"
+            request = ReasoningRequest(
+                prompt=prompt,
+                json_schema=self._build_json_schema(prompt_type, cleaned_actions, template),
+            )
+            self._latest_reasoning_requests[prompt_type] = request
+            return request.prompt
+
+        if prompt_type == "options":
+            template_max = template.get("max_k", max_k)
+            effective_max = min(max_k, template_max)
+            example_options: Dict[str, Dict[str, str]] = {}
+            for index, action in enumerate(cleaned_actions[:effective_max], start=1):
+                example_options[f"option_{index}"] = {
+                    "action": action,
+                    "target": f"<{action}_target>",
+                }
+            if not example_options:
+                example_options["option_1"] = {"action": "move", "target": "<move_target>"}
+            example_string = json.dumps(example_options)
+            prompt = f"{instruction.format(max_k=effective_max)} {output_prefix}{example_string}\n"
+            request = ReasoningRequest(
+                prompt=prompt,
+                json_schema=self._build_json_schema(prompt_type, cleaned_actions, template, effective_max),
+            )
+            self._latest_reasoning_requests[prompt_type] = request
+            return request.prompt
+
+        if prompt_type == "decision":
+            default_action = cleaned_actions[0] if cleaned_actions else template.get("default_action", "move")
+            example_decision = {"decision": {"action": default_action, "target": f"<{default_action}_target>"}}
+            example_string = json.dumps(example_decision)
+            prompt = f"{instruction} {output_prefix}{example_string}\n"
+            request = ReasoningRequest(
+                prompt=prompt,
+                json_schema=self._build_json_schema(prompt_type, cleaned_actions, template),
+            )
+            self._latest_reasoning_requests[prompt_type] = request
+            return request.prompt
+
+        request = ReasoningRequest(prompt=instruction)
+        self._latest_reasoning_requests[prompt_type] = request
+        return request.prompt
+
+    def _allow_gimmick_actions(self) -> bool:
+        account_configuration = getattr(getattr(self, "ps_client", None), "account_configuration", None)
+        username = getattr(account_configuration, "username", "") or ""
+        return "pokellmon" not in username.lower()
+
+    def _allowed_actions(self, battle: Battle, *, moves: bool, switches: bool) -> List[str]:
+        actions: List[str] = []
+        if moves:
+            actions.append("move")
+            if self._allow_gimmick_actions():
+                if getattr(battle, "can_dynamax", False):
+                    actions.append("dynamax")
+                if getattr(battle, "can_tera", False):
+                    actions.append("terastallize")
+        if switches:
+            actions.append("switch")
+        ordered: List[str] = []
+        for action in actions:
+            if action not in ordered:
+                ordered.append(action)
+        return ordered
+
+    def _resolve_metadata_path(self, payload: Dict[str, Any], path: str) -> Any:
+        current: Any = payload
+        for key in path.split('.'):
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            else:
+                return None
+        return current
+
+    def _capture_reasoning_metadata(self, payload: Dict[str, Any]) -> None:
+        self.reasoning_telemetry = {}
+        config = getattr(self, "reasoning_config", None)
+        if not config or not config.metadata_hints:
+            return
+        for label, paths in config.metadata_hints.items():
+            for path in paths:
+                value = self._resolve_metadata_path(payload, path)
+                if value is not None:
+                    self.reasoning_telemetry[label] = value
+                    break
+
+    def _battle_order_from_dict(
+        self,
+        action_payload: Dict[str, Any],
+        battle: Battle,
+        sim: LocalSim,
+        *,
+        dont_verify: bool = False,
+        state_action_prompt: str = "",
+    ) -> Optional[BattleOrder]:
+        if "output" in action_payload and isinstance(action_payload["output"], dict):
+            nested = self._battle_order_from_dict(
+                action_payload["output"],
+                battle,
+                sim,
+                dont_verify=dont_verify,
+                state_action_prompt=state_action_prompt,
+            )
+            if nested is not None:
+                return nested
+        if "response" in action_payload and isinstance(action_payload["response"], dict):
+            nested = self._battle_order_from_dict(
+                action_payload["response"],
+                battle,
+                sim,
+                dont_verify=dont_verify,
+                state_action_prompt=state_action_prompt,
+            )
+            if nested is not None:
+                return nested
+        dynamax = "dynamax" in action_payload
+        tera = "terastallize" in action_payload
+        if "move" in action_payload or dynamax or tera:
+            if dynamax:
+                llm_move_id = action_payload["dynamax"].strip()
+            elif tera:
+                llm_move_id = action_payload["terastallize"].strip()
+            else:
+                llm_move_id = action_payload["move"].strip()
+            move_list = battle.available_moves
+            if dont_verify and battle.opponent_active_pokemon is not None:
+                move_list = battle.opponent_active_pokemon.moves.values()
+            for move in move_list:
+                if move.id.lower().replace(' ', '') == llm_move_id.lower().replace(' ', ''):
+                    return self.create_order(move, dynamax=dynamax, terastallize=tera)
+            if dont_verify and llm_move_id and state_action_prompt:
+                normalized = llm_move_id.lower().replace(' ', '')
+                if normalized in state_action_prompt:
+                    return self.create_order(Move(normalized, self.gen.gen), dynamax=dynamax, terastallize=tera)
+
+        if "switch" in action_payload:
+            llm_switch_species = action_payload["switch"].strip()
+            switch_list = battle.available_switches
+            if dont_verify:
+                observable_switches = []
+                for _, opponent_pokemon in battle.opponent_team.items():
+                    if not opponent_pokemon.active:
+                        observable_switches.append(opponent_pokemon)
+                switch_list = observable_switches
+            for pokemon in switch_list:
+                if pokemon.species.lower().replace(' ', '') == llm_switch_species.lower().replace(' ', ''):
+                    return self.create_order(pokemon)
+        return None
+
+    def parse_new(self, llm_output: str, battle: Battle, sim: LocalSim, state_action_prompt: str = "") -> Optional[BattleOrder]:
+        try:
+            parsed = json.loads(llm_output)
+        except Exception:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        self._capture_reasoning_metadata(parsed)
+        payload: Dict[str, Any]
+        if "decision" in parsed and isinstance(parsed["decision"], dict):
+            decision = parsed["decision"]
+            action_type = decision.get("action")
+            target = decision.get("target")
+            payload = {}
+            if action_type == "switch":
+                payload["switch"] = target or ""
+            elif action_type in {"dynamax", "terastallize"}:
+                payload[action_type] = target or ""
+            elif action_type:
+                payload["move"] = target or ""
+            else:
+                payload = decision
+        else:
+            payload = parsed
+        return self._battle_order_from_dict(payload, battle, sim, state_action_prompt=state_action_prompt)
+
+    def get_LLM_action(
+        self,
+        system_prompt,
+        user_prompt,
+        model,
+        temperature=0.7,
+        json_format=False,
+        seed=None,
+        stop=[],
+        max_tokens=200,
+        actions=None,
+        llm=None,
+        response_schema: Optional[Dict[str, Any]] = None,
+        reasoning_effort: Optional[str] = None,
+    ) -> str:
+        if llm is None:
+            output, _ = self.llm.get_LLM_action(
+                system_prompt,
+                user_prompt,
+                model,
+                temperature,
+                json_format,
+                seed,
+                stop,
+                max_tokens=max_tokens,
+                actions=actions,
+                response_schema=response_schema,
+                reasoning_effort=reasoning_effort,
+            )
+        else:
+            output, _ = llm.get_LLM_action(
+                system_prompt,
+                user_prompt,
+                model,
+                temperature,
+                json_format,
+                seed,
+                stop,
+                max_tokens=max_tokens,
+                actions=actions,
+                response_schema=response_schema,
+                reasoning_effort=reasoning_effort,
+            )
         return output
     
     def check_all_pokemon(self, pokemon_str: str) -> Pokemon:
@@ -207,42 +745,37 @@ class LLMPlayer(Player):
         moves = [move.id for move in battle.available_moves]
         switches = [pokemon.species for pokemon in battle.available_switches]
         actions = [moves, switches]
-        
-
-        gimmick_output_format = ''
-        if 'pokellmon' not in self.ps_client.account_configuration.username: # make sure we dont mess with pokellmon original strat
-            gimmick_output_format = f'{f' or {{"dynamax":"<move_name>"}}' if battle.can_dynamax else ''}{f' or {{"terastallize":"<move_name>"}}' if battle.can_tera else ''}'
 
         if battle.active_pokemon.fainted or len(battle.available_moves) == 0:
-
-            constraint_prompt_io = '''Choose the most suitable pokemon to switch. Your output MUST be a JSON like: {"switch":"<switch_pokemon_name>"}\n'''
-            constraint_prompt_cot = '''Choose the most suitable pokemon to switch by thinking step by step. Your thought should no more than 4 sentences. Your output MUST be a JSON like: {"thought":"<step-by-step-thinking>", "switch":"<switch_pokemon_name>"}\n'''
-            constraint_prompt_tot_1 = '''Generate top-k (k<=3) best switch options. Your output MUST be a JSON like:{"option_1":{"action":"switch","target":"<switch_pokemon_name>"}, ..., "option_k":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
-            constraint_prompt_tot_2 = '''Select the best option from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:{"decision":{"action":"switch","target":"<switch_pokemon_name>"}}\n'''
+            allowed_actions = self._allowed_actions(battle, moves=False, switches=True)
         elif len(battle.available_switches) == 0:
-            constraint_prompt_io = f'''Choose the best action and your output MUST be a JSON like: {{"move":"<move_name>"}}{gimmick_output_format}\n'''
-            constraint_prompt_cot = '''Choose the best action by thinking step by step. Your thought should no more than 4 sentences. Your output MUST be a JSON like: {"thought":"<step-by-step-thinking>", "move":"<move_name>"} or {"thought":"<step-by-step-thinking>"}\n'''
-            constraint_prompt_tot_1 = '''Generate top-k (k<=3) best action options. Your output MUST be a JSON like: {"option_1":{"action":"<move>", "target":"<move_name>"}, ..., "option_k":{"action":"<move>", "target":"<move_name>"}}\n'''
-            constraint_prompt_tot_2 = '''Select the best action from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:"decision":{"action":"<move>", "target":"<move_name>"}\n'''
+            allowed_actions = self._allowed_actions(battle, moves=True, switches=False)
         else:
-            constraint_prompt_io = f'''Choose the best action and your output MUST be a JSON like: {{"move":"<move_name>"}}{gimmick_output_format} or {{"switch":"<switch_pokemon_name>"}}\n'''
-            constraint_prompt_cot = '''Choose the best action by thinking step by step. Your thought should no more than 4 sentences. Your output MUST be a JSON like: {"thought":"<step-by-step-thinking>", "move":"<move_name>"} or {"thought":"<step-by-step-thinking>", "switch":"<switch_pokemon_name>"}\n'''
-            constraint_prompt_tot_1 = '''Generate top-k (k<=3) best action options. Your output MUST be a JSON like: {"option_1":{"action":"<move_or_switch>", "target":"<move_name_or_switch_pokemon_name>"}, ..., "option_k":{"action":"<move_or_switch>", "target":"<move_name_or_switch_pokemon_name>"}}\n'''
-            constraint_prompt_tot_2 = '''Select the best action from the following choices by considering their consequences: [OPTIONS]. Your output MUST be a JSON like:"decision":{"action":"<move_or_switch>", "target":"<move_name_or_switch_pokemon_name>"}\n'''
+            allowed_actions = self._allowed_actions(battle, moves=True, switches=True)
 
-        state_prompt_io = state_prompt + state_action_prompt + constraint_prompt_io
-        state_prompt_cot = state_prompt + state_action_prompt + constraint_prompt_cot
-        state_prompt_tot_1 = state_prompt + state_action_prompt + constraint_prompt_tot_1
-        state_prompt_tot_2 = state_prompt + state_action_prompt + constraint_prompt_tot_2
+        constraint_prompt_io = self.format_reasoning_request("action", allowed_actions)
+        constraint_prompt_cot = self.format_reasoning_request("reasoned_action", allowed_actions)
+        constraint_prompt_tot_1 = self.format_reasoning_request("options", allowed_actions)
+        constraint_prompt_tot_2 = self.format_reasoning_request("decision", allowed_actions)
+
+        constraint_request_io = self._get_reasoning_request("action", constraint_prompt_io)
+        constraint_request_cot = self._get_reasoning_request("reasoned_action", constraint_prompt_cot)
+        constraint_request_tot_1 = self._get_reasoning_request("options", constraint_prompt_tot_1)
+        constraint_request_tot_2 = self._get_reasoning_request("decision", constraint_prompt_tot_2)
+
+        state_prompt_io = state_prompt + state_action_prompt + constraint_request_io.prompt
+        state_prompt_cot = state_prompt + state_action_prompt + constraint_request_cot.prompt
+        state_prompt_tot_1 = state_prompt + state_action_prompt + constraint_request_tot_1.prompt
+        state_prompt_tot_2 = state_prompt + state_action_prompt + constraint_request_tot_2.prompt
 
         retries = 10
         # Chain-of-thought
         if self.prompt_algo == "io":
-            return self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim, actions=actions)
+            return self.io(retries, system_prompt, state_prompt, constraint_request_cot, constraint_request_io, state_action_prompt, battle, sim, actions=actions)
 
         # Self-consistency with k = 3
         elif self.prompt_algo == "sc":
-            return self.sc(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle, sim)
+            return self.sc(retries, system_prompt, state_prompt, constraint_request_cot, constraint_request_io, state_action_prompt, battle, sim)
 
         # Tree of thought, k = 3
         elif self.prompt_algo == "tot":
@@ -250,12 +783,15 @@ class LLMPlayer(Player):
             next_action = None
             for i in range(retries):
                 try:
-                    llm_output1 = self.get_LLM_action(system_prompt=system_prompt,
-                                               user_prompt=state_prompt_tot_1,
+                    tot_system_prompt, tot_prompt_1 = self.build_reasoning_prompt(system_prompt, state_prompt_tot_1)
+                    llm_output1 = self.get_LLM_action(system_prompt=tot_system_prompt,
+                                               user_prompt=tot_prompt_1,
                                                model=self.backend,
                                                temperature=self.temperature,
                                                max_tokens=200,
-                                               json_format=True)
+                                               json_format=True,
+                                               response_schema=constraint_request_tot_1.json_schema,
+                                               reasoning_effort=self._reasoning_effort_param())
                     break
                 except:
                     raise ValueError('No valid move', battle.active_pokemon.fainted, len(battle.available_switches))
@@ -266,14 +802,18 @@ class LLMPlayer(Player):
 
             for i in range(retries):
                 try:
-                    llm_output2 = self.get_LLM_action(system_prompt=system_prompt,
-                                               user_prompt=state_prompt_tot_2.replace("[OPTIONS]", llm_output1),
+                    tot_prompt_2 = state_prompt_tot_2.replace("[OPTIONS]", llm_output1)
+                    tot_system_prompt_2, tot_prompt_2 = self.build_reasoning_prompt(system_prompt, tot_prompt_2)
+                    llm_output2 = self.get_LLM_action(system_prompt=tot_system_prompt_2,
+                                               user_prompt=tot_prompt_2,
                                                model=self.backend,
                                                temperature=self.temperature,
                                                max_tokens=100,
-                                               json_format=True)
+                                               json_format=True,
+                                               response_schema=constraint_request_tot_2.json_schema,
+                                               reasoning_effort=self._reasoning_effort_param())
 
-                    next_action = self.parse_new(llm_output2, battle, sim)
+                    next_action = self.parse_new(llm_output2, battle, sim, state_action_prompt)
                     with open(f"{self.log_dir}/output.jsonl", "a") as f:
                         f.write(json.dumps({"turn": battle.turn,
                                             "system_prompt": system_prompt,
@@ -310,19 +850,25 @@ class LLMPlayer(Player):
         
     def io(self, retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt, battle: Battle, sim, dont_verify=False, actions=None):
         next_action = None
-        cot_prompt = 'In fewer than 3 sentences, let\'s think step by step:'
-        state_prompt_io = state_prompt + state_action_prompt + constraint_prompt_io + cot_prompt
+        request_io = self._coerce_reasoning_request(constraint_prompt_io, "action")
+        self._coerce_reasoning_request(constraint_prompt_cot, "reasoned_action")
+        state_prompt_io = state_prompt + state_action_prompt + request_io.prompt
+        system_prompt_io, user_prompt_io = self.build_reasoning_prompt(system_prompt, state_prompt_io)
+        response_schema = request_io.json_schema
+        reasoning_effort = self._reasoning_effort_param()
 
         for i in range(retries):
             try:
-                llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                            user_prompt=state_prompt_io,
+                llm_output = self.get_LLM_action(system_prompt=system_prompt_io,
+                                            user_prompt=user_prompt_io,
                                             model=self.backend,
                                             temperature=self.temperature,
                                             max_tokens=300,
                                             # stop=["reason"],
                                             json_format=True,
-                                            actions=actions)
+                                            actions=actions,
+                                            response_schema=response_schema,
+                                            reasoning_effort=reasoning_effort)
 
                 # load when llm does heavylifting for parsing
                 if DEBUG:
@@ -330,68 +876,19 @@ class LLMPlayer(Player):
                 llm_action_json = json.loads(llm_output)
                 if DEBUG:
                     print(f"Parsed JSON: {llm_action_json}")
-                next_action = None
+                if isinstance(llm_action_json, dict):
+                    self._capture_reasoning_metadata(llm_action_json)
+                next_action = self._battle_order_from_dict(
+                    llm_action_json if isinstance(llm_action_json, dict) else {},
+                    battle,
+                    sim,
+                    dont_verify=dont_verify,
+                    state_action_prompt=state_action_prompt,
+                )
 
-                dynamax = "dynamax" in llm_action_json.keys()
-                tera = "terastallize" in llm_action_json.keys()
-                is_a_move = dynamax or tera
-
-                if "move" in llm_action_json.keys() or is_a_move:
-                    if dynamax:
-                        llm_move_id = llm_action_json["dynamax"].strip()
-                    elif tera:
-                        llm_move_id = llm_action_json["terastallize"].strip()
-                    else:
-                        llm_move_id = llm_action_json["move"].strip()
-                    move_list = battle.available_moves
-                    if dont_verify: # opponent
-                        move_list = battle.opponent_active_pokemon.moves.values()
-                    
-                    # Debug: print available moves
-                    if DEBUG:
-                        print(f"LLM requested move: '{llm_move_id}'")
-                        print(f"Available moves: {[move.id for move in move_list]}")
-                    
-                    for i, move in enumerate(move_list):
-                        if move.id.lower().replace(' ', '') == llm_move_id.lower().replace(' ', ''):
-                            #next_action = self.create_order(move, dynamax=sim._should_dynamax(battle), terastallize=sim._should_terastallize(battle))
-                            next_action = self.create_order(move, dynamax=dynamax, terastallize=tera)
-                            if DEBUG:
-                                print(f"Move match found: {move.id}")
-                            break
-                    
-                    if next_action is None and dont_verify:
-                        # unseen move so just check if it is in the action prompt
-                        if llm_move_id.lower().replace(' ', '') in state_action_prompt:
-                            next_action = self.create_order(Move(llm_move_id.lower().replace(' ', ''), self.gen.gen), dynamax=dynamax, terastallize=tera)
-                    
-                    if next_action is None and DEBUG:
-                        print(f"No move match found for '{llm_move_id}'")
-                elif "switch" in llm_action_json.keys():
-                    llm_switch_species = llm_action_json["switch"].strip()
-                    switch_list = battle.available_switches
-                    if dont_verify: # opponent prediction
-                        observable_switches = []
-                        for _, opponent_pokemon in battle.opponent_team.items():
-                            if not opponent_pokemon.active:
-                                observable_switches.append(opponent_pokemon)
-                        switch_list = observable_switches
-                    
-                    # Debug: print available switches
-                    if DEBUG:
-                        print(f"LLM requested switch: '{llm_switch_species}'")
-                        print(f"Available switches: {[pokemon.species for pokemon in switch_list]}")
-                    
-                    for i, pokemon in enumerate(switch_list):
-                        if pokemon.species.lower().replace(' ', '') == llm_switch_species.lower().replace(' ', ''):
-                            next_action = self.create_order(pokemon)
-                            if DEBUG:
-                                print(f"Switch match found: {pokemon.species}")
-                            break
-                    
-                else:
+                if next_action is None and not isinstance(llm_action_json, dict):
                     raise ValueError('No valid action')
-                
+
                 # with open(f"{self.log_dir}/output.jsonl", "a") as f:
                 #     f.write(json.dumps({"turn": battle.turn,
                 #                         "system_prompt": system_prompt,
@@ -625,8 +1122,9 @@ class LLMPlayer(Player):
                                     'Remove points for each pokemon remaining on the opponent\'s team, weighted by their strength.\n'
                     cot_prompt = 'Briefly justify your total score, up to 100 words. Then, conclude with the score in the JSON format: {"score": <total_points>}. '
                     state_prompt_io = state_prompt + value_prompt + cot_prompt
-                    llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                                    user_prompt=state_prompt_io,
+                    system_prompt_value, user_prompt_value = self.build_reasoning_prompt(system_prompt, state_prompt_io)
+                    llm_output = self.get_LLM_action(system_prompt=system_prompt_value,
+                                                    user_prompt=user_prompt_value,
                                                     model=self.backend,
                                                     temperature=self.temperature,
                                                     max_tokens=500,
@@ -689,8 +1187,9 @@ class LLMPlayer(Player):
                                 {"choice":"damage calculator"} or {"choice":"minimax"}'''
 
                             state_prompt_io = state_prompt + tool_prompt
-                            llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                                            user_prompt=state_prompt_io,
+                            system_prompt_tool, user_prompt_tool = self.build_reasoning_prompt(system_prompt, state_prompt_io)
+                            llm_output = self.get_LLM_action(system_prompt=system_prompt_tool,
+                                                            user_prompt=user_prompt_tool,
                                                             model=self.backend,
                                                             temperature=0.6,
                                                             max_tokens=100,
@@ -713,9 +1212,11 @@ class LLMPlayer(Player):
             # get llm switch
             if len(node.simulation.battle.available_switches) != 0:# or opp_turns < dmg_calc_turns):
                 state_action_prompt_switch = state_action_prompt + action_prompt_switch + '\nYou can only choose to switch this turn.\n'
-                constraint_prompt_io = 'Choose the best action and your output MUST be a JSON like: {"switch":"<switch_pokemon_name>"}.\n'
+                switch_actions = self._allowed_actions(node.simulation.battle, moves=False, switches=True)
+                constraint_prompt_io = self.format_reasoning_request("action", switch_actions)
+                constraint_request_io = self._get_reasoning_request("action", constraint_prompt_io)
                 for i in range(2):
-                    action_llm_switch = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt_switch, node.simulation.battle, node.simulation)
+                    action_llm_switch = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_request_io, state_action_prompt_switch, node.simulation.battle, node.simulation)
                     if len(player_actions) == 0:
                         player_actions.append(action_llm_switch)
                     elif action_llm_switch.message != player_actions[-1].message:
@@ -724,8 +1225,10 @@ class LLMPlayer(Player):
             if not node.simulation.battle.active_pokemon.fainted and len(battle.available_moves) > 0:# and not opp_turns < dmg_calc_turns:
                 # get llm move
                 state_action_prompt_move = state_action_prompt + action_prompt_move + '\nYou can only choose to move this turn.\n'
-                constraint_prompt_io = 'Choose the best action and your output MUST be a JSON like: {"move":"<move_name>"}.\n'
-                action_llm_move = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_prompt_io, state_action_prompt_move, node.simulation.battle, node.simulation)
+                move_actions = self._allowed_actions(node.simulation.battle, moves=True, switches=False)
+                constraint_prompt_io = self.format_reasoning_request("action", move_actions)
+                constraint_request_io = self._get_reasoning_request("action", constraint_prompt_io)
+                action_llm_move = self.io(retries, system_prompt, state_prompt, constraint_prompt_cot, constraint_request_io, state_action_prompt_move, node.simulation.battle, node.simulation)
                 if len(player_actions) == 0:
                     player_actions.append(action_llm_move)
                 elif action_llm_move.message != player_actions[0].message:
@@ -867,8 +1370,9 @@ class LLMPlayer(Player):
                         {"choice":"damage calculator"} or {"choice":"minimax"}'''
 
                         state_prompt_io = state_prompt + tool_prompt
-                        llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                                        user_prompt=state_prompt_io,
+                        system_prompt_tool, user_prompt_tool = self.build_reasoning_prompt(system_prompt, state_prompt_io)
+                        llm_output = self.get_LLM_action(system_prompt=system_prompt_tool,
+                                                        user_prompt=user_prompt_tool,
                                                         model=self.backend,
                                                         temperature=0.6,
                                                         max_tokens=100,
@@ -917,8 +1421,9 @@ class LLMPlayer(Player):
                                         'Remove points for each pokemon remaining on the opponent\'s team, weighted by their strength.\n'
                         cot_prompt = 'Briefly justify your total score, up to 100 words. Then, conclude with the score in the JSON format: {"score": <total_points>}. '
                         state_prompt_io = state_prompt + value_prompt + cot_prompt
-                        llm_output = self.get_LLM_action(system_prompt=system_prompt,
-                                                        user_prompt=state_prompt_io,
+                        system_prompt_value, user_prompt_value = self.build_reasoning_prompt(system_prompt, state_prompt_io)
+                        llm_output = self.get_LLM_action(system_prompt=system_prompt_value,
+                                                        user_prompt=user_prompt_value,
                                                         model=self.backend,
                                                         temperature=self.temperature,
                                                         max_tokens=500,
