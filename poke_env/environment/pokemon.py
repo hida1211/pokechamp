@@ -112,8 +112,17 @@ class Pokemon:
         self._status: Optional[Status] = None
         self._status_counter: int = 0
 
-        with open('poke_env/data/static/gen9/ou/sets_1500.json', 'r') as f:
-            sets = json.load(f)
+        try:
+            with open('poke_env/data/static/gen9/ou/sets_1500.json', 'r') as f:
+                sets = json.load(f)
+        except FileNotFoundError:
+            try:
+                with open('poke_env/data/static/gen9/ou/sets_1000.json', 'r') as f:
+                    sets = json.load(f)
+                print("⚠️  sets_1500.json not found, using sets_1000.json instead")
+            except FileNotFoundError:
+                print("⚠️  gen9 set files not found, using empty dictionary")
+                sets = {}
         self._sets = sets
         
         
