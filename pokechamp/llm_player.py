@@ -22,6 +22,7 @@ from poke_env.data.gen_data import GenData
 from pokechamp.gpt_player import GPTPlayer
 from pokechamp.llama_player import LLAMAPlayer
 from pokechamp.openrouter_player import OpenRouterPlayer
+from pokechamp.claude_player import ClaudePlayer
 from pokechamp.gemini_player import GeminiPlayer
 from pokechamp.ollama_player import OllamaPlayer
 from pokechamp.data_cache import (
@@ -111,13 +112,15 @@ class LLMPlayer(Player):
                 model_name = backend.replace('ollama/', '')
                 print(f"Using Ollama with model: {model_name}")
                 self.llm = OllamaPlayer(model=model_name, device=device)
+            elif backend.startswith('anthropic/'):
+                self.llm = ClaudePlayer(self.api_key)
             elif 'gpt' in backend and not backend.startswith('openai/'):
                 self.llm = GPTPlayer(self.api_key)
             elif 'llama' == backend:
                 self.llm = LLAMAPlayer(device=device)
             elif 'gemini' in backend:
                 self.llm = GeminiPlayer(self.api_key)
-            elif backend.startswith(('openai/', 'anthropic/', 'google/', 'meta/', 'mistral/', 'cohere/', 'perplexity/', 'deepseek/', 'microsoft/', 'nvidia/', 'huggingface/', 'together/', 'replicate/', 'fireworks/', 'localai/', 'vllm/', 'sagemaker/', 'vertex/', 'bedrock/', 'azure/', 'custom/')):
+            elif backend.startswith(('openai/', 'google/', 'meta/', 'mistral/', 'cohere/', 'perplexity/', 'deepseek/', 'microsoft/', 'nvidia/', 'huggingface/', 'together/', 'replicate/', 'fireworks/', 'localai/', 'vllm/', 'sagemaker/', 'vertex/', 'bedrock/', 'azure/', 'custom/')):
                 # OpenRouter supports hundreds of models from various providers
                 self.llm = OpenRouterPlayer(self.api_key)
             else:
