@@ -1,7 +1,7 @@
 import json
 import sys
 from time import sleep
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional, Union
 import numpy as np
 from copy import deepcopy
 
@@ -164,7 +164,13 @@ class LocalSim():
                 self.moves_set = {}
 
 
-    def get_llm_system_prompt(self, _format: str, llm: GPTPlayer | LLAMAPlayer = None, team_str: str=None, model: str='gpt-4o'):
+    def get_llm_system_prompt(
+        self,
+        _format: str,
+        llm: Optional[Union[GPTPlayer, LLAMAPlayer]] = None,
+        team_str: str = None,
+        model: str = 'gpt-4o'
+    ):
         # sleep to make sure server has sent pokemon team information first
         # llm = GPTPlayer(api_key=KEY)
         if 'random' in _format:
