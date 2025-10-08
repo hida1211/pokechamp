@@ -17,16 +17,25 @@ class OpenRouterPlayer():
         self.site_url = os.getenv('OPENROUTER_SITE_URL', 'https://github.com/pokechamp')
         self.site_name = os.getenv('OPENROUTER_SITE_NAME', 'PokeChamp')
 
-    def get_LLM_action(self, system_prompt, user_prompt, model='openai/gpt-4o', temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=200, actions=None) -> str:
+    def get_LLM_action(self, system_prompt, user_prompt, model='openai/gpt-4o', temperature=0.7, json_format=False, seed=None, stop=[], max_tokens=200, actions=None, response_schema=None, reasoning_effort=None) -> str:
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=self.api_key,
         )
-        
+
         try:
             if json_format:
+                response_format = {"type": "json_object"}
+                if response_schema:
+                    response_format = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "battle_action",
+                            "schema": response_schema,
+                        },
+                    }
                 response = client.chat.completions.create(
-                    response_format={"type": "json_object"},
+                    response_format=response_format,
                     model=model,
                     messages=[
                         {"role": "system", "content": system_prompt},
