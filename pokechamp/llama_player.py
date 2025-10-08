@@ -22,7 +22,7 @@ class LLAMAPlayer():
         self.model.config.pad_token_id = self.model.config.eos_token_id
         self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
-    def get_LLM_action(self, system_prompt, user_prompt, model, temperature=0.7, json_format=True, seed=None, stop=[], max_tokens=20, actions=None) -> str:
+    def get_LLM_action(self, system_prompt, user_prompt, model, temperature=0.7, json_format=True, seed=None, stop=[], max_tokens=20, actions=None, response_schema=None, reasoning_effort=None) -> str:
         output_padding = ''
         if json_format:
             output_padding  = '\n{"'

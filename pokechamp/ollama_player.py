@@ -34,7 +34,7 @@ class OllamaPlayer():
         # except Exception as e:
         #     print(f"Warning: Could not check available models: {e}")
     
-    def get_LLM_action(self, system_prompt, user_prompt, model, temperature=0.7, json_format=True, seed=None, stop=[], max_tokens=20, actions=None, think=True) -> str:
+    def get_LLM_action(self, system_prompt, user_prompt, model, temperature=0.7, json_format=True, seed=None, stop=[], max_tokens=20, actions=None, think=True, response_schema=None, reasoning_effort=None) -> str:
         """
         Get action from LLM using Ollama API.
         
