@@ -12,8 +12,13 @@ Automatically load a local .env if present so API keys configured in
 
 # Best-effort .env autoload (no-op if dependency missing)
 try:  # pragma: no cover - environment bootstrap
+    import os
     from dotenv import load_dotenv
-    load_dotenv()  # loads .env from current working dir or parents
+    # 1) Try CWD/parents
+    load_dotenv()
+    # 2) Fallback to package root (repo root) so `pokechamp/.env` is found
+    pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    load_dotenv(os.path.join(pkg_root, '.env'))
 except Exception:
     pass
 

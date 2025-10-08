@@ -54,6 +54,12 @@ class GeminiPlayer:
             "gemini-pro": GeminiModelConfig("gemini-2.5-pro"),
             "gemini-pro-2.5": GeminiModelConfig("gemini-2.5-pro"),
 
+            # Common latest aliases encountered in docs / Vertex-style strings
+            "gemini-flash-latest": GeminiModelConfig("gemini-2.5-flash"),
+            "models/gemini-flash-latest": GeminiModelConfig("gemini-2.5-flash"),
+            "gemini-pro-latest": GeminiModelConfig("gemini-2.5-pro"),
+            "models/gemini-pro-latest": GeminiModelConfig("gemini-2.5-pro"),
+
             # Gemini 2.5 reasoning variants
             "gemini-2.5-pro-exp": GeminiModelConfig("gemini-2.5-pro-exp", requires_reasoning=True),
             "gemini-2.5-pro-experimental": GeminiModelConfig("gemini-2.5-pro-exp", requires_reasoning=True),
